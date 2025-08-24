@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="da">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dynamisk Bilbudget Beregner (Online)</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React -->
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <!-- Babel -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Firebase SDKs - Loaded as standard scripts -->
+    <script src="https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js"></script>
+
+    <style>
+        /* Styles for printing the budget */
+        @media print {
+            body * { visibility: hidden; }
+            #print-section, #print-section * { visibility: visible; }
+            #print-section { position: absolute; left: 0; top: 0; width: 100%; }
+            .no-print { display: none; }
+        }
+        /* Simple spinner animation */
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .spinner {
+            border: 4px solid rgba(0, 0, 0, 0.1);
+            border-left-color: #4f46e5; /* Indigo color */
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+        }
+    </style>
+</head>
+<body class="bg-gray-50">
+    <!-- React app will be rendered here -->
+    <div id="root">
+        <!-- Initial loading spinner -->
+        <div class="flex items-center justify-center h-screen">
+            <div class="spinner"></div>
+        </div>
+    </div>
+    
+    <!-- All JavaScript logic is now in a single block to prevent timing issues -->
+    <script type="text/babel" data-presets="react">
+        // --- FINAL FIX: Wait for the entire page to load before running any script ---
+        window.addEventListener('DOMContentLoaded', () => {
+    
+            // === 1. FIREBASE INITIALIZATION ===
+            
+            // Destructure functions from the global firebase object
+            const { initializeApp } = firebase.app;
+            const { getFirestore, doc, setDoc, onSnapshot, collection, query, deleteDoc } = firebase.firestore;
+            const { getAuth, signInAnonymously, onAuthStateChanged } = firebase.auth;
+
+            // Your personal Firebase configuration
+            const firebaseConfig = {
+                apiKey: "AIzaSyAluqHT_mF5ez2qSuqOa82YIXWM2ftdbNw",
+                authDomain: "bil-budget-app.firebaseapp.com",
+                projectId: "bil-budget-app",
+                storageBucket: "bil-budget-app.firebasestorage.app",
+                messagingSenderId: "1045464125884",
+                appId: "1:1045464125884:web:9e2847723fa2d59fc05bb9"
+            };
+            
+            let db, auth;
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+            } catch (error) {
+                console.error("Firebase initialization failed:", error);
+                const rootDiv = document.getElementById('root');
+                rootDiv.innerHTML = `<div class="text-center p-8 text-red-600"><strong>Fejl:</strong> ${error.message}</div>`;
+                return; // Stop execution if firebase fails
+            }
+
+            // === 2. REACT APPLICATION ===
+
+            const { useState, useEffect } = React;
+
+            const formatCurrency = (value) => {
+              if (isNaN(value) || value === null) return 'N/A';
+              return new Intl.NumberFormat('da-DK', { style: 'currency', currency: 'DKK', minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(value);
+            };
+
+            const initialCars = [
+                { id: 1, type: 'Køb', drivmiddel: 'El', name: 'Ny Megane (Eksempel)', pris: 274990, laaneTid: 96, finansieringYdelse: 2744, udbetaling: 54998, service: 400, forsikring: 650, gronAfgiftHalvaar: 420, daekPrisTotal: 6000, daekLevetidMdr: 48, vaerditabProcent: 90, uforudseteReparationer: 350, synsPris: 500, isFavorite: false },
+                { id: 2, type: 'Leasing', drivmiddel: 'Benzin', name: 'Captur (Eksempel)', nypris: 199820, udbetaling: 0, leasingYdelse: 3301, leasingPeriode: 36, service: 0, forsikring: 0, gronAfgiftHalvaar: 640, daekPrisTotal: 5000, daekLevetidMdr: 48, uforudseteReparationer: 0, kmPerLiter: 18, isFavorite: false },
+            ];
+
+            function App() {
+              const [parameters, setParameters] = useState({ periode: 48, opladningsAbonnement: 899, kmPerAar: 25000, benzinPris: 14.5 });
+              const [cars, setCars] = useState([]);
+              const [newCar, setNewCar] = useState({ type: 'Leasing', drivmiddel: 'El', name: '', udbetaling: 0, leasingYdelse: 4000, leasingPeriode: 36, nypris: 300000, service: 0, forsikring: 650, gronAfgiftHalvaar: 420, daekPrisTotal: 0, daekLevetidMdr: 48, uforudseteReparationer: 0, pris: 250000, laaneTid: 96, vaerditabProcent: 90, finansieringYdelse: 2500, synsPris: 500, kmPerLiter: 20, isFavorite: false });
+              const [errorModalVisible, setErrorModalVisible] = useState(false);
+              const [confirmCarModalState, setConfirmCarModalState] = useState({ isOpen: false, carId: null, carName: '' });
+              const [confirmScenarioModalState, setConfirmScenarioModalState] = useState({ isOpen: false, scenarioId: null });
+              const [saveMessage, setSaveMessage] = useState('');
+              const [saveName, setSaveName] = useState('');
+              const [savedScenarios, setSavedScenarios] = useState([]);
+              const [selectedScenario, setSelectedScenario] = useState('');
+              const [isKøbVisible, setIsKøbVisible] = useState(true);
+              const [isLeasingVisible, setIsLeasingVisible] = useState(true);
+              const [isSidebarVisible, setIsSidebarVisible] = useState(window.innerWidth >= 1024);
+              const [userId, setUserId] = useState(null);
+              const [isLoading, setIsLoading] = useState(true);
+              const [isInitialLoadDone, setIsInitialLoadDone] = useState(false);
+
+              useEffect(() => {
+                  const unsubscribe = onAuthStateChanged(auth, (user) => {
+                      if (user) {
+                          setUserId(user.uid);
+                      } else {
+                          signInAnonymously(auth).catch((error) => console.error("Anonymous sign-in failed:", error));
+                      }
+                  });
+                  return () => unsubscribe();
+              }, []);
+
+              useEffect(() => {
+                  if (!userId) return;
+                  const scenariosCollection = collection(db, 'users', userId, 'scenarios');
+                  
+                  const unsubscribe = onSnapshot(query(scenariosCollection), (snapshot) => {
+                      const scenariosData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                      setSavedScenarios(scenariosData);
+                      
+                      if (!isInitialLoadDone) {
+                          if (snapshot.empty) {
+                              setCars(initialCars);
+                          } else {
+                              const firstScenario = scenariosData[0];
+                              setCars(firstScenario.cars.map(c => ({...c, isFavorite: c.isFavorite || false})));
+                              setParameters(firstScenario.parameters);
+                              setSelectedScenario(firstScenario.id);
+                              setSaveName(firstScenario.id);
+                          }
+                          setIsInitialLoadDone(true);
+                          setIsLoading(false);
+                      }
+                  }, (error) => {
+                      console.error("Error fetching scenarios:", error);
+                      setIsLoading(false);
+                  });
+                  return () => unsubscribe();
+              }, [userId, isInitialLoadDone]);
+              
+              const showSaveMessage = (msg) => {
+                setSaveMessage(msg);
+                setTimeout(() => setSaveMessage(''), 2500);
+              };
+
+              const saveData = async () => {
+                  if (!saveName || !userId) {
+                      showSaveMessage('Indtast et navn for at gemme.');
+                      return;
+                  }
+                  try {
+                      const scenarioRef = doc(db, 'users', userId, 'scenarios', saveName);
+                      await setDoc(scenarioRef, { cars, parameters });
+                      showSaveMessage(`'${saveName}' er gemt online!`);
+                      setSelectedScenario(saveName);
+                  } catch (error) {
+                      console.error("Error saving document: ", error);
+                      showSaveMessage('Fejl: Kunne ikke gemme online.');
+                  }
+              };
+
+              const loadData = (scenarioId) => {
+                  if (!scenarioId) return;
+                  const dataToLoad = savedScenarios.find(s => s.id === scenarioId);
+                  if (dataToLoad) {
+                      setCars(dataToLoad.cars.map(c => ({...c, isFavorite: c.isFavorite || false})));
+                      setParameters(dataToLoad.parameters);
+                      setSelectedScenario(scenarioId);
+                      setSaveName(scenarioId);
+                      showSaveMessage(`'${scenarioId}' er hentet!`);
+                  }
+              };
+              
+              const openDeleteScenarioModal = (scenarioId) => {
+                  if (!scenarioId) {
+                      showSaveMessage('Vælg et scenarie at slette.');
+                      return;
+                  }
+                  setConfirmScenarioModalState({ isOpen: true, scenarioId: scenarioId });
+              };
+              
+              const closeDeleteScenarioModal = () => setConfirmScenarioModalState({ isOpen: false, scenarioId: null });
+
+              const handleConfirmDeleteScenario = async () => {
+                  const scenarioIdToDelete = confirmScenarioModalState.scenarioId;
+                  if (!scenarioIdToDelete || !userId) return;
+                  
+                  try {
+                      const scenarioRef = doc(db, 'users', userId, 'scenarios', scenarioIdToDelete);
+                      await deleteDoc(scenarioRef);
+                      showSaveMessage(`'${scenarioIdToDelete}' er slettet.`);
+                      setSelectedScenario('');
+                      setSaveName('');
+                      if(savedScenarios.length <= 1) {
+                        setCars(initialCars);
+                        setParameters({ periode: 48, opladningsAbonnement: 899, kmPerAar: 25000, benzinPris: 14.5 });
+                      }
+                  } catch (error) {
+                      console.error("Error deleting document: ", error);
+                      showSaveMessage('Fejl: Kunne ikke slette.');
+                  } finally {
+                      closeDeleteScenarioModal();
+                  }
+              };
+              
+              const handleCarChange = (id, field, value) => {
+                setCars(prevCars =>
+                  prevCars.map(car =>
+                    car.id === id ? { ...car, [field]: value === '' ? '' : (field === 'name' ? value : parseFloat(value) || 0) } : car
+                  )
+                );
+              };
+              
+              const handleNewCarChange = (e) => {
+                const { name, value, type } = e.target;
+                let parsedValue = value;
+                  if (type === 'number') {
+                      parsedValue = parseFloat(value) || 0;
+                }
+                const updatedCar = { ...newCar, [name]: parsedValue };
+                
+                if (name === 'drivmiddel') {
+                    updatedCar.gronAfgiftHalvaar = value === 'Benzin' ? 640 : 370;
+                }
+                if (name === 'type') {
+                    updatedCar.uforudseteReparationer = value === 'Køb' ? 350 : 0;
+                }
+                setNewCar(updatedCar);
+              };
+
+              const addCar = () => {
+                if (!newCar.name) {
+                  setErrorModalVisible(true);
+                  return;
+                }
+                const newCarData = { ...newCar, id: Date.now() };
+                setCars(prev => [...prev, newCarData]);
+                setNewCar({ type: 'Leasing', drivmiddel: 'El', name: '', udbetaling: 0, leasingYdelse: 4000, leasingPeriode: 36, nypris: 300000, service: 0, forsikring: 650, gronAfgiftHalvaar: 370, daekPrisTotal: 0, daekLevetidMdr: 48, uforudseteReparationer: 0, pris: 250000, laaneTid: 96, vaerditabProcent: 90, finansieringYdelse: 2500, synsPris: 500, kmPerLiter: 20, isFavorite: false });
+              };
+
+              const openRemoveCarModal = (id, name) => setConfirmCarModalState({ isOpen: true, carId: id, carName: name });
+              const closeRemoveCarModal = () => setConfirmCarModalState({ isOpen: false, carId: null, carName: '' });
+
+              const handleConfirmRemoveCar = () => {
+                if (confirmCarModalState.carId !== null) {
+                  setCars(prev => prev.filter(car => car.id !== confirmCarModalState.carId));
+                }
+                closeRemoveCarModal();
+              };
+              
+              const handleToggleFavorite = (id) => setCars(prevCars => prevCars.map(car => car.id === id ? {...car, isFavorite: !car.isFavorite} : car));
+              
+              const handleDuplicateCar = (id) => {
+                  const carToCopy = cars.find(car => car.id === id);
+                  if (!carToCopy) return;
+                  const newName = `${carToCopy.name} (Kopi)`;
+                  const newCar = { ...carToCopy, id: Date.now(), name: newName, isFavorite: false };
+                  const originalIndex = cars.findIndex(car => car.id === id);
+                  const newCars = [...cars];
+                  newCars.splice(originalIndex + 1, 0, newCar);
+                  setCars(newCars);
+              };
+
+              const handleMoveCar = (id, direction) => {
+                  const carToMove = cars.find(c => c.id === id);
+                  if (!carToMove) return;
+                  const carTypeGroup = cars.filter(c => c.type === carToMove.type);
+                  const currentIndexInGroup = carTypeGroup.findIndex(c => c.id === id);
+                  let targetIndexInGroup;
+                  if (direction === 'left' && currentIndexInGroup > 0) targetIndexInGroup = currentIndexInGroup - 1;
+                  else if (direction === 'right' && currentIndexInGroup < carTypeGroup.length - 1) targetIndexInGroup = currentIndexInGroup + 1;
+                  else return; 
+                  const targetCar = carTypeGroup[targetIndexInGroup];
+                  const newCars = [...cars];
+                  const index1 = newCars.findIndex(c => c.id === carToMove.id);
+                  const index2 = newCars.findIndex(c => c.id === targetCar.id);
+                  [newCars[index1], newCars[index2]] = [newCars[index2], newCars[index1]];
+                  setCars(newCars);
+              };
+
+              const kobeBiler = cars.filter(car => car.type === 'Køb');
+              const leasingBiler = cars.filter(car => car.type === 'Leasing');
+
+              const renderCarColumn = (car, index, group) => {
+                const gronAfgiftMonthly = (car.gronAfgiftHalvaar || 0) / 6;
+                const daekMonthly = (car.daekPrisTotal || 0) / (car.daekLevetidMdr || 1);
+                const synMonthly = car.type === 'Køb' ? (car.synsPris || 0) / 24 : 0;
+                let drivmiddelMonthly = 0;
+                if (car.drivmiddel === 'El') drivmiddelMonthly = parameters.opladningsAbonnement || 0;
+                else if (car.drivmiddel === 'Benzin' && car.kmPerLiter > 0) {
+                    const kmPerMonth = (parameters.kmPerAar || 0) / 12;
+                    drivmiddelMonthly = (kmPerMonth / car.kmPerLiter) * (parameters.benzinPris || 0);
+                }
+                const kerneYdelse = car.type === 'Køb' ? car.finansieringYdelse : car.leasingYdelse;
+                const driftsudgifter = (car.forsikring || 0) + (car.service || 0) + gronAfgiftMonthly + daekMonthly + (car.uforudseteReparationer || 0) + synMonthly + drivmiddelMonthly;
+                const totalPerMaaned = kerneYdelse + driftsudgifter;
+                const samletUdgiftTotal = (totalPerMaaned * parameters.periode) + car.udbetaling;
+                const favoriteClass = car.isFavorite ? 'bg-green-50 border-green-300' : 'bg-white';
+                const drivmiddelColorClass = car.drivmiddel === 'El' ? 'bg-blue-50' : 'bg-orange-50';
+                const totalFinancingCost = car.type === 'Køb' ? (car.finansieringYdelse * (car.laaneTid || 0)) + (car.udbetaling || 0) : 0;
+                const samletBetalingBil = (kerneYdelse * parameters.periode) + car.udbetaling;
+
+                return (
+                  <div key={car.id} className={`border rounded-lg shadow-md p-3 relative flex flex-col ${favoriteClass}`}>
+                    <div className="mb-2">
+                        <input type="text" value={car.name} onChange={(e) => handleCarChange(car.id, 'name', e.target.value)} className={`font-bold text-sm p-1 rounded-md border border-gray-300 w-full ${drivmiddelColorClass}`} />
+                    </div>
+                    <div className="flex justify-between items-center mb-2">
+                        <div className="flex items-center space-x-2">
+                            <span className={`text-xs font-bold px-2 py-1 rounded-full ${car.drivmiddel === 'El' ? 'bg-blue-100 text-blue-800' : 'bg-orange-100 text-orange-800'}`}>{car.drivmiddel}</span>
+                            <button onClick={() => handleMoveCar(car.id, 'left')} disabled={index === 0} className="p-1 disabled:opacity-25 text-gray-500 hover:text-gray-800"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11 17l-5-5m0 0l5-5m-5 5h12" /></svg></button>
+                            <button onClick={() => handleMoveCar(car.id, 'right')} disabled={index === group.length - 1} className="p-1 disabled:opacity-25 text-gray-500 hover:text-gray-800"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 7l5 5m0 0l-5 5m5-5H6" /></svg></button>
+                        </div>
+                        <div className="flex items-center">
+                            <button onClick={() => handleToggleFavorite(car.id)} className="p-1 text-gray-400 hover:text-yellow-500"><svg className={`w-5 h-5 ${car.isFavorite ? 'text-yellow-400' : ''}`} fill="currentColor" viewBox="0 0 20 20"><path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" /></svg></button>
+                            <button onClick={() => handleDuplicateCar(car.id)} className="p-1 text-gray-400 hover:text-blue-500"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg></button>
+                            <button onClick={() => openRemoveCarModal(car.id, car.name)} className="p-1 text-red-400 hover:text-red-600"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg></button>
+                        </div>
+                    </div>
+                    
+                    <div className="mb-4">
+                        <h4 className="font-semibold text-xs text-gray-500 mb-1">Engangsudgifter</h4>
+                        <div className="flex justify-between items-center text-sm"><span>Udbetaling</span><input type="number" value={car.udbetaling} onChange={(e) => handleCarChange(car.id, 'udbetaling', e.target.value)} className="w-20 p-1 text-right rounded-md border" /></div>
+                    </div>
+                    {car.type === 'Køb' ? (
+                        <div className="mb-4 bg-blue-50 p-2 rounded-lg">
+                            <h4 className="font-semibold text-xs text-blue-800 mb-1">Finansieringsdetaljer</h4>
+                            <div className="flex justify-between items-center text-sm"><span>Kontantpris</span><input type="number" value={car.pris} onChange={(e) => handleCarChange(car.id, 'pris', e.target.value)} className="w-20 p-1 text-right rounded-md border" /></div>
+                            <div className="flex justify-between items-center text-sm"><span>Løbetid (mdr.)</span><input type="number" value={car.laaneTid} onChange={(e) => handleCarChange(car.id, 'laaneTid', e.target.value)} className="w-20 p-1 text-right rounded-md border" /></div>
+                            <div className="flex justify-between items-center text-sm mt-1"><span>Værditab 8 år (%)</span><input type="number" value={car.vaerditabProcent} onChange={(e) => handleCarChange(car.id, 'vaerditabProcent', e.target.value)} className="w-20 p-1 text-right rounded-md border" /></div>
+                            <div className="flex justify-between items-center text-sm mt-2 pt-2 border-t border-blue-200"><span className="font-bold text-blue-800">Samlet tilbagebetaling</span><span className="font-bold text-blue-800">{formatCurrency(totalFinancingCost)}</span></div>
+                        </div>
+                    ) : (
+                        <div className="mb-4 bg-green-50 p-2 rounded-lg">
+                            <h4 className="font-semibold text-xs text-green-800 mb-1">Leasing Detaljer</h4>
+                            <div className="flex justify-between items-center text-sm"><span>Nypris</span><input type="number" value={car.nypris} onChange={(e) => handleCarChange(car.id, 'nypris', e.target.value)} className="w-20 p-1 text-right rounded-md border" /></div>
+                            <div className="flex justify-between items-center text-sm"><span>Leasingperiode (mdr.)</span><input type="number" value={car.leasingPeriode} onChange={(e) => handleCarChange(car.id, 'leasingPeriode', e.target.value)} className="w-20 p-1 text-right rounded-md border" /></div>
+                        </div>
+                    )}
+                    <div className="mb-4">
+                        <h4 className="font-semibold text-xs text-gray-500 mb-1">Bilens Kerneydelse</h4>
+                        <div className="flex justify-between items-center text-sm"><span>{car.type === 'Køb' ? 'Finansiering/md' : 'Leasingydelse/md'}</span><input type="number" value={kerneYdelse} onChange={(e) => handleCarChange(car.id, car.type === 'Køb' ? 'finansieringYdelse' : 'leasingYdelse', e.target.value)} className="w-20 p-1 text-right rounded-md border" /></div>
+                        <div className="flex justify-between items-center text-sm mt-2 pt-2 border-t"><span className="font-bold">Betaling for bil ({parameters.periode} mdr.)</span><span className="font-bold">{formatCurrency(samletBetalingBil)}</span></div>
+                    </div>
+                    <div className="mb-4">
+                        <h4 className="font-semibold text-xs text-gray-500 mb-1">Faste Månedlige Driftsudgifter</h4>
+                        <div className="flex justify-between items-center text-sm"><span>Forsikring</span><input type="number" value={car.forsikring} onChange={(e) => handleCarChange(car.id, 'forsikring', e.target.value)} className="w-20 p-1 text-right rounded-md border" /></div>
+                        <div className="flex justify-between items-center text-sm"><span>Serviceaftale</span><input type="number" value={car.service} onChange={(e) => handleCarChange(car.id, 'service', e.target.value)} className="w-20 p-1 text-right rounded-md border" /></div>
+                        {car.type === 'Køb' && <div className="flex justify-between items-center text-sm"><span>Uforudsete Rep.</span><input type="number" value={car.uforudseteReparationer} onChange={(e) => handleCarChange(car.id, 'uforudseteReparationer', e.target.value)} className="w-20 p-1 text-right rounded-md border" /></div>}
+                        <div className="flex justify-between items-center text-sm"><span>Grøn afgift (halvår)</span><div className="flex flex-col items-end"><input type="number" value={car.gronAfgiftHalvaar} onChange={(e) => handleCarChange(car.id, 'gronAfgiftHalvaar', e.target.value)} className="w-20 p-1 text-right rounded-md border" /><span className="text-xs text-gray-500">({formatCurrency(gronAfgiftMonthly)}/md)</span></div></div>
+                        <div className="flex justify-between items-center text-sm">
+                            <span>{car.drivmiddel === 'El' ? 'Opladning' : 'Benzin'}</span>
+                            <span className="font-medium">{formatCurrency(drivmiddelMonthly)}</span>
+                        </div>
+                        {car.drivmiddel === 'Benzin' && <div className="flex justify-between items-center text-sm"><span>Km/l</span><input type="number" value={car.kmPerLiter} onChange={(e) => handleCarChange(car.id, 'kmPerLiter', e.target.value)} className="w-20 p-1 text-right rounded-md border" /></div>}
+                        <div className="bg-gray-50 p-2 rounded-lg mt-2">
+                            <h5 className="font-semibold text-xs text-gray-500 mb-1">Periodiske Udgifter</h5>
+                            <div className="flex justify-between items-center text-sm"><span>Dækpris (4 stk.)</span><input type="number" value={car.daekPrisTotal} onChange={(e) => handleCarChange(car.id, 'daekPrisTotal', e.target.value)} className="w-20 p-1 text-right rounded-md border" /></div>
+                            <div className="flex justify-between items-center text-sm"><span>Dæklevetid (mdr.)</span><input type="number" value={car.daekLevetidMdr} onChange={(e) => handleCarChange(car.id, 'daekLevetidMdr', e.target.value)} className="w-20 p-1 text-right rounded-md border" /></div>
+                            {car.type === 'Køb' && <div className="flex justify-between items-center text-sm"><span>Syn (hvert 2. år)</span><input type="number" value={car.synsPris} onChange={(e) => handleCarChange(car.id, 'synsPris', e.target.value)} className="w-20 p-1 text-right rounded-md border" /></div>}
+                            <div className="flex justify-between items-center text-sm pt-1 border-t mt-1"><span className="font-medium">Periodisk/md</span><span className="font-medium">{formatCurrency(daekMonthly + synMonthly)}</span></div>
+                        </div>
+                        <div className="flex justify-between items-center text-sm mt-2 pt-2 border-t"><span className="font-bold">Drift i alt (md.)</span><span className="font-bold">{formatCurrency(driftsudgifter)}</span></div>
+                    </div>
+                    <div className="bg-gray-100 p-2 rounded-lg mt-auto">
+                        <div className="flex justify-between items-center text-sm font-bold"><span>I ALT PR. MÅNED</span><span>{formatCurrency(totalPerMaaned)}</span></div>
+                        <div className="flex justify-between items-center text-sm font-bold mt-2 pt-2 border-t"><span>SAMLET UDGIFT ({parameters.periode} mdr.)</span><span>{formatCurrency(samletUdgiftTotal)}</span></div>
+                    </div>
+                  </div>
+                );
+              };
+              
+              if (isLoading) {
+                  return <div className="flex items-center justify-center h-screen"><div className="spinner"></div></div>;
+              }
+
+              return (
+                <div className="font-sans">
+                    {errorModalVisible && <div className="fixed inset-0 bg-gray-600 bg-opacity-50 h-full w-full z-50 flex items-center justify-center"><div className="p-5 border w-96 shadow-lg rounded-md bg-white text-center"><h3 className="text-lg font-medium text-gray-900">Fejl</h3><p className="text-sm text-gray-500 mt-2">Indtast venligst et navn til den nye bil.</p><div className="mt-4"><button onClick={() => setErrorModalVisible(false)} className="px-4 py-2 bg-indigo-500 text-white rounded-md hover:bg-indigo-700">OK</button></div></div></div>}
+                    {confirmCarModalState.isOpen && <div className="fixed inset-0 bg-gray-600 bg-opacity-50 h-full w-full z-50 flex items-center justify-center"><div className="p-5 border w-96 shadow-lg rounded-md bg-white text-center"><h3 className="text-lg font-medium text-gray-900">Bekræft sletning</h3><p className="text-sm text-gray-500 mt-2">Er du sikker på, at du vil fjerne "{confirmCarModalState.carName}"?</p><div className="mt-4"><button onClick={handleConfirmRemoveCar} className="px-4 py-2 bg-red-500 text-white rounded-md hover:bg-red-700">Ja, fjern</button><button onClick={closeRemoveCarModal} className="px-4 py-2 bg-gray-200 rounded-md ml-2 hover:bg-gray-300">Annuller</button></div></div></div>}
+                    {confirmScenarioModalState.isOpen && <div className="fixed inset-0 bg-gray-600 bg-opacity-50 h-full w-full z-50 flex items-center justify-center"><div className="p-5 border w-96 shadow-lg rounded-md bg-white text-center"><h3 className="text-lg font-medium text-gray-900">Bekræft sletning</h3><p className="text-sm text-gray-500 mt-2">Er du sikker på, at du vil slette scenariet "{confirmScenarioModalState.scenarioId}"?</p><div className="mt-4"><button onClick={handleConfirmDeleteScenario} className="px-4 py-2 bg-red-500 text-white rounded-md hover:bg-red-700">Ja, slet</button><button onClick={closeDeleteScenarioModal} className="px-4 py-2 bg-gray-200 rounded-md ml-2 hover:bg-gray-300">Annuller</button></div></div></div>}
+                    
+                    <div className="w-full max-w-screen-2xl mx-auto p-4">
+                        <header className="flex items-center justify-center relative mb-6 py-4 sticky top-0 z-20 bg-gray-50 no-print">
+                            <div className="absolute left-0">
+                                <button onClick={() => setIsSidebarVisible(!isSidebarVisible)} className="flex items-center space-x-2 bg-white p-2 rounded-lg shadow hover:bg-gray-100 border text-sm">
+                                    <svg className={`w-5 h-5 transition-transform duration-300 ${isSidebarVisible ? '' : 'rotate-180'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 19l-7-7 7-7"></path></svg>
+                                    <span className="hidden sm:inline">{isSidebarVisible ? 'Skjul' : 'Vis'} Parametre</span>
+                                </button>
+                            </div>
+                            <div className="text-center px-16">
+                                <h1 className="text-2xl sm:text-3xl font-bold text-gray-800">Dynamisk Bilbudget Beregner</h1>
+                                <p className="text-sm sm:text-base text-gray-600">Sammenlign el-, benzin-, leasing- og køb af biler</p>
+                            </div>
+                        </header>
+                        
+                        <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+                            {isSidebarVisible && (
+                                <div className="lg:col-span-1 bg-white p-4 rounded-lg shadow-md h-fit lg:sticky top-28 no-print">
+                                    <h3 className="text-lg font-bold mb-3 border-b pb-2">Globale Parametre</h3>
+                                    <div className="space-y-3 text-sm">
+                                        <div><label className="font-semibold text-gray-600 block">Periode (mdr.)</label><input type="number" value={parameters.periode} onChange={(e) => setParameters({...parameters, periode: parseFloat(e.target.value)})} className="w-full p-1 border rounded-md" /></div>
+                                        <div><label className="font-semibold text-gray-600 block">Km/år</label><input type="number" value={parameters.kmPerAar} onChange={(e) => setParameters({...parameters, kmPerAar: parseFloat(e.target.value)})} className="w-full p-1 border rounded-md" /></div>
+                                        <div><label className="font-semibold text-gray-600 block">Benzinpris (kr/l)</label><input type="number" step="0.1" value={parameters.benzinPris} onChange={(e) => setParameters({...parameters, benzinPris: parseFloat(e.target.value)})} className="w-full p-1 border rounded-md" /></div>
+                                        <div><label className="font-semibold text-gray-600 block">Opladnings-abo (kr/md)</label><input type="number" value={parameters.opladningsAbonnement} onChange={(e) => setParameters({...parameters, opladningsAbonnement: parseFloat(e.target.value)})} className="w-full p-1 border rounded-md" /></div>
+                                    </div>
+                                    
+                                    <h3 className="text-lg font-bold mb-3 border-b pb-2 mt-6">Tilføj Ny Bil</h3>
+                                    <div className="space-y-2 text-sm">
+                                        <input type="text" name="name" placeholder="Bilens Navn" value={newCar.name} onChange={handleNewCarChange} className="w-full p-1 border rounded-md" />
+                                        <select name="type" value={newCar.type} onChange={handleNewCarChange} className="w-full p-1 border rounded-md"><option value="Køb">Køb</option><option value="Leasing">Leasing</option></select>
+                                        <select name="drivmiddel" value={newCar.drivmiddel} onChange={handleNewCarChange} className="w-full p-1 border rounded-md"><option value="El">El</option><option value="Benzin">Benzin</option></select>
+                                        <button onClick={addCar} className="w-full bg-indigo-500 text-white py-2 rounded-md hover:bg-indigo-600 transition-colors">Tilføj Bil</button>
+                                    </div>
+
+                                    <h3 className="text-lg font-bold mb-3 border-b pb-2 mt-6">Gem & Hent Online</h3>
+                                    <div className="space-y-2 text-sm">
+                                        <div className="flex space-x-2">
+                                            <input type="text" placeholder="Navn på scenarie..." value={saveName} onChange={(e) => setSaveName(e.target.value)} className="w-full p-1 border rounded-md" />
+                                            <button onClick={saveData} title="Gem" className="bg-blue-500 text-white px-3 rounded-md hover:bg-blue-600"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" /></svg></button>
+                                        </div>
+                                        <div className="flex space-x-2">
+                                            <select value={selectedScenario} onChange={(e) => loadData(e.target.value)} className="w-full p-1 border rounded-md">
+                                                <option value="">Vælg et gemt scenarie</option>
+                                                {savedScenarios.map(s => <option key={s.id} value={s.id}>{s.id}</option>)}
+                                            </select>
+                                            <button onClick={() => openDeleteScenarioModal(selectedScenario)} title="Slet valgte scenarie" className="bg-red-500 text-white px-3 rounded-md hover:bg-red-600 disabled:opacity-50" disabled={!selectedScenario}><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg></button>
+                                        </div>
+                                        {saveMessage && <div className="text-center text-xs text-green-700 p-2 bg-green-100 rounded-md">{saveMessage}</div>}
+                                    </div>
+                                </div>
+                            )}
+                            
+                            <div className={isSidebarVisible ? "lg:col-span-3" : "lg:col-span-4"}>
+                                <div id="print-section" className="space-y-8">
+                                    {kobeBiler.length > 0 && (
+                                        <div>
+                                            <div className="flex items-center text-2xl font-bold text-gray-700 mb-3 p-3 bg-gray-100 rounded-t-lg border-b-2 border-blue-500">
+                                                <button onClick={() => setIsKøbVisible(!isKøbVisible)} className="mr-3 p-1 rounded-full hover:bg-gray-200 no-print"><svg className={`w-6 h-6 transition-transform duration-200 ${isKøbVisible ? '' : '-rotate-90'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"></path></svg></button>
+                                                <h2>Køb af Bil</h2>
+                                            </div>
+                                            {isKøbVisible && <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-4">{kobeBiler.map((car, index) => renderCarColumn(car, index, kobeBiler))}</div>}
+                                        </div>
+                                    )}
+                                    {leasingBiler.length > 0 && (
+                                        <div>
+                                            <div className="flex items-center text-2xl font-bold text-gray-700 mb-3 p-3 bg-gray-100 rounded-t-lg border-b-2 border-green-500">
+                                                <button onClick={() => setIsLeasingVisible(!isLeasingVisible)} className="mr-3 p-1 rounded-full hover:bg-gray-200 no-print"><svg className={`w-6 h-6 transition-transform duration-200 ${isLeasingVisible ? '' : '-rotate-90'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"></path></svg></button>
+                                                <h2>Privatleasing</h2>
+                                            </div>
+                                            {isLeasingVisible && <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-4">{leasingBiler.map((car, index) => renderCarColumn(car, index, leasingBiler))}</div>}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+              );
+            }
+            
+            // === 3. START THE APP ===
+            const container = document.getElementById('root');
+            if (container && db) { // Only render if Firebase initialized correctly
+                const root = ReactDOM.createRoot(container);
+                root.render(<App />);
+            }
+        });
+    </script>
+</body>
+</html>
